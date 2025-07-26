@@ -1,7 +1,20 @@
 [project]
 name = "paper-news"
 version = "0.1.0"
-description = "Add your description here"
+description = "YouTube trend analyzer for discovering popular topics in specific areas"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "streamlit>=1.28.0",
+    "langchain>=0.1.0",
+    "langgraph>=0.0.20",
+    "openai>=1.0.0",
+    "google-api-python-client>=2.100.0",
+    "pandas>=2.0.0",
+    "plotly>=5.17.0",
+    "python-dotenv>=1.0.0",
+    "chromadb>=0.4.0",
+    "tiktoken>=0.5.0",
+    "langchain-openai>=0.3.28",
+    "langchain-community>=0.3.27",
+]
