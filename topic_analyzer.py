@@ -1,6 +1,7 @@
 """LangChain-based topic analyzer for YouTube video data."""
 
 import os
+import uuid
 from typing import List, Dict, Tuple
 from collections import Counter
 import pandas as pd
@@ -10,7 +11,6 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain.schema import Document
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,12 +63,13 @@ class TopicAnalyzer:
                 
         return videos
     
-    def cluster_similar_topics(self, videos: List[Dict]) -> Dict[str, List[Dict]]:
+    def cluster_similar_topics(self, videos: List[Dict], similarity_threshold: float = 0.7) -> Dict[str, List[Dict]]:
         """
-        Cluster videos by similar topics using embeddings.
+        Cluster videos by similar topics using embeddings and semantic similarity.
         
         Args:
             videos: List of videos with extracted topics
+            similarity_threshold: Minimum similarity score to consider videos as related (0-1)
             
         Returns:
             Dictionary mapping cluster topics to lists of videos
@@ -76,82 +77,135 @@ class TopicAnalyzer:
         if not videos:
             return {}
             
+        # Create a mapping of video_id to video for easy lookup
+        video_map = {v["video_id"]: v for v in videos}
+        
         # Create documents from video topics
         documents = []
+        video_ids = []
         for video in videos:
             if video.get("main_topic"):
                 text = f"{video['main_topic']} {' '.join(video.get('subtopics', []))}"
                 doc = Document(
                     page_content=text,
-                    metadata={"video_id": video["video_id"], "title": video["title"]}
+                    metadata={
+                        "video_id": video["video_id"], 
+                        "title": video["title"],
+                        "main_topic": video["main_topic"]
+                    }
                 )
                 documents.append(doc)
+                video_ids.append(video["video_id"])
         
         if not documents:
             return {}
             
         # Create vector store for similarity search
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
-        splits = text_splitter.split_documents(documents)
+        # Use a unique collection name to avoid conflicts
+        collection_name = f"video_topics_{uuid.uuid4().hex[:8]}"
         
         vectorstore = Chroma.from_documents(
-            documents=splits,
+            documents=documents,
             embedding=self.embeddings,
-            collection_name="video_topics"
+            collection_name=collection_name
         )
         
-        # Use LLM to identify main topic clusters
-        cluster_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert at identifying trending topics and patterns.
-            Based on the list of topics, identify the main topic clusters.
-            Group similar topics together and provide a clear, concise name for each cluster.
-            Return a JSON object with 'clusters' containing a list of cluster objects,
-            each with 'name' and 'keywords' (list of related keywords)."""),
-            ("user", "Topics: {topics}")
-        ])
-        
-        all_topics = [video.get("main_topic", "") for video in videos if video.get("main_topic")]
-        topic_counts = Counter(all_topics)
-        
-        json_parser = JsonOutputParser()
-        cluster_chain = cluster_prompt | self.llm | json_parser
-        
-        try:
-            cluster_result = cluster_chain.invoke({
-                "topics": ", ".join(topic_counts.most_common(20)[i][0] for i in range(min(20, len(topic_counts))))
-            })
-            
-            clusters = cluster_result.get("clusters", [])
-            
-        except Exception as e:
-            print(f"Error identifying clusters: {e}")
-            clusters = []
-        
-        # Group videos by clusters
+        # Find clusters using semantic similarity
         clustered_videos = {}
+        processed_video_ids = set()
         
-        for cluster in clusters:
-            cluster_name = cluster["name"]
-            keywords = cluster.get("keywords", [])
-            clustered_videos[cluster_name] = []
-            
-            for video in videos:
-                video_text = f"{video.get('main_topic', '')} {' '.join(video.get('subtopics', []))}"
+        # Sort videos by view count to start clustering from most popular videos
+        sorted_videos = sorted(videos, key=lambda x: x.get("view_count", 0), reverse=True)
+        
+        for seed_video in sorted_videos:
+            if seed_video["video_id"] in processed_video_ids:
+                continue
                 
-                # Check if video matches any keyword in the cluster
-                if any(keyword.lower() in video_text.lower() for keyword in keywords):
-                    clustered_videos[cluster_name].append(video)
+            if not seed_video.get("main_topic"):
+                continue
+            
+            # Search for semantically similar videos
+            query_text = f"{seed_video['main_topic']} {' '.join(seed_video.get('subtopics', []))}"
+            similar_docs = vectorstore.similarity_search_with_score(
+                query_text, 
+                k=min(20, len(documents))  # Get up to 20 similar videos
+            )
+            
+            # Group similar videos together
+            cluster_videos = []
+            cluster_topics = []
+            
+            for doc, score in similar_docs:
+                # Use similarity threshold
+                if score <= (1 - similarity_threshold):  # Chroma returns distance, not similarity
+                    video_id = doc.metadata["video_id"]
+                    if video_id not in processed_video_ids:
+                        cluster_videos.append(video_map[video_id])
+                        cluster_topics.append(doc.metadata["main_topic"])
+                        processed_video_ids.add(video_id)
+            
+            if len(cluster_videos) >= 2:  # Only create cluster if we have at least 2 videos
+                # Generate cluster name based on common topics
+                cluster_name = self._generate_cluster_name(cluster_topics)
+                clustered_videos[cluster_name] = cluster_videos
         
         # Add unclustered videos
-        clustered_video_ids = set()
-        for videos_list in clustered_videos.values():
-            clustered_video_ids.update(v["video_id"] for v in videos_list)
-        
-        unclustered = [v for v in videos if v["video_id"] not in clustered_video_ids]
+        unclustered = [v for v in videos if v["video_id"] not in processed_video_ids]
         if unclustered:
-            clustered_videos["Other Topics"] = unclustered
+            # Try to group unclustered videos by exact topic match
+            remaining_groups = {}
+            for video in unclustered:
+                topic = video.get("main_topic", "Other Topics")
+                if topic not in remaining_groups:
+                    remaining_groups[topic] = []
+                remaining_groups[topic].append(video)
+            
+            # Add groups with multiple videos as clusters
+            for topic, vids in remaining_groups.items():
+                if len(vids) >= 2:
+                    clustered_videos[topic] = vids
+                else:
+                    # Single videos go to "Other Topics"
+                    if "Other Topics" not in clustered_videos:
+                        clustered_videos["Other Topics"] = []
+                    clustered_videos["Other Topics"].extend(vids)
             
         return clustered_videos
+    
+    def _generate_cluster_name(self, topics: List[str]) -> str:
+        """
+        Generate a descriptive name for a cluster based on its topics.
+        
+        Args:
+            topics: List of main topics in the cluster
+            
+        Returns:
+            A descriptive cluster name
+        """
+        if not topics:
+            return "Other Topics"
+            
+        # Count topic frequencies
+        topic_counts = Counter(topics)
+        most_common = topic_counts.most_common(3)
+        
+        # If there's a dominant topic, use it
+        if most_common[0][1] >= len(topics) * 0.5:
+            return most_common[0][0]
+        
+        # Otherwise, use LLM to generate a name
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "Generate a concise, descriptive name for a group of related topics. Return only the name, nothing else."),
+                ("user", "Topics: {topics}")
+            ])
+            
+            chain = prompt | self.llm
+            result = chain.invoke({"topics": ", ".join(set(topics[:10]))})
+            return result.content.strip()
+        except:
+            # Fallback to most common topic
+            return most_common[0][0] if most_common else "Other Topics"
     
     def calculate_trend_scores(self, clustered_videos: Dict[str, List[Dict]]) -> List[Dict]:
         """

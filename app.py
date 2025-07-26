@@ -101,7 +101,9 @@ if analyze_button:
         status_text.text("Clustering similar topics...")
         progress_bar.progress(80)
         
-        clustered_videos = topic_analyzer.cluster_similar_topics(videos_with_topics)
+        # Use semantic similarity for clustering with configurable threshold
+        similarity_threshold = 0.7  # Can be made configurable in sidebar
+        clustered_videos = topic_analyzer.cluster_similar_topics(videos_with_topics, similarity_threshold)
         
         # Step 5: Calculate trend scores
         status_text.text("Calculating trend scores...")
