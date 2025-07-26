@@ -113,7 +113,7 @@ class YouTubeClient:
                     "view_count": int(item["statistics"].get("viewCount", 0)),
                     "like_count": int(item["statistics"].get("likeCount", 0)),
                     "comment_count": int(item["statistics"].get("commentCount", 0)),
-                    "duration": item["contentDetails"]["duration"]
+                    "duration": item.get("contentDetails", {}).get("duration", "PT0S")
                 }
             
         return stats

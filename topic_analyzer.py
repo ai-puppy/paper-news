@@ -2,7 +2,8 @@
 
 import os
 import uuid
-from typing import List, Dict, Tuple
+import asyncio
+from typing import List, Dict, Tuple, Optional, Callable
 from collections import Counter
 import pandas as pd
 from langchain_openai import ChatOpenAI
@@ -23,14 +24,49 @@ class TopicAnalyzer:
             temperature=0.1,
             api_key=os.getenv("OPENAI_API_KEY")
         )
-        self.embeddings = OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"))
+        self.embeddings = OpenAIEmbeddings(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="text-embedding-3-small"
+        )
         
-    def extract_topics(self, videos: List[Dict]) -> List[Dict]:
+    async def _extract_single_topic(self, video: Dict, chain, semaphore) -> Dict:
         """
-        Extract main topics from video titles and descriptions.
+        Extract topics for a single video asynchronously.
+        
+        Args:
+            video: Video dictionary
+            chain: LangChain processing chain
+            semaphore: Asyncio semaphore for rate limiting
+            
+        Returns:
+            Video with extracted topics
+        """
+        async with semaphore:  # Limit concurrent requests
+            try:
+                result = await chain.ainvoke({
+                    "title": video["title"],
+                    "description": video.get("description", "")[:500]  # Limit description length
+                })
+                
+                video["main_topic"] = result.get("main_topic", "")
+                video["subtopics"] = result.get("subtopics", [])
+                
+            except Exception as e:
+                print(f"Error extracting topics for video {video['video_id']}: {e}")
+                video["main_topic"] = ""
+                video["subtopics"] = []
+                
+        return video
+    
+    async def extract_topics_async(self, videos: List[Dict], batch_size: int = 5, 
+                                   progress_callback: Optional[Callable] = None) -> List[Dict]:
+        """
+        Extract main topics from video titles and descriptions using async parallel processing.
         
         Args:
             videos: List of video dictionaries
+            batch_size: Number of concurrent API calls (default: 5)
+            progress_callback: Optional callback function(current, total, batch_info)
             
         Returns:
             List of videos with extracted topics
@@ -46,22 +82,57 @@ class TopicAnalyzer:
         json_parser = JsonOutputParser()
         chain = topic_extraction_prompt | self.llm | json_parser
         
-        for video in videos:
-            try:
-                result = chain.invoke({
-                    "title": video["title"],
-                    "description": video.get("description", "")[:500]  # Limit description length
-                })
-                
-                video["main_topic"] = result.get("main_topic", "")
-                video["subtopics"] = result.get("subtopics", [])
-                
-            except Exception as e:
-                print(f"Error extracting topics for video {video['video_id']}: {e}")
-                video["main_topic"] = ""
-                video["subtopics"] = []
-                
-        return videos
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(batch_size)
+        
+        # Process videos in batches
+        results = []
+        total_videos = len(videos)
+        
+        for batch_start in range(0, total_videos, batch_size):
+            batch_end = min(batch_start + batch_size, total_videos)
+            batch = videos[batch_start:batch_end]
+            
+            # Report progress
+            if progress_callback:
+                batch_info = {
+                    "batch_start": batch_start,
+                    "batch_end": batch_end,
+                    "processing_titles": [v["title"][:50] + "..." if len(v["title"]) > 50 else v["title"] 
+                                          for v in batch]
+                }
+                progress_callback(batch_start, total_videos, batch_info)
+            
+            # Process batch concurrently
+            batch_tasks = [
+                self._extract_single_topic(video, chain, semaphore) 
+                for video in batch
+            ]
+            
+            batch_results = await asyncio.gather(*batch_tasks)
+            results.extend(batch_results)
+            
+            # Small delay between batches to avoid rate limiting
+            if batch_end < total_videos:
+                await asyncio.sleep(0.5)
+        
+        return results
+    
+    def extract_topics(self, videos: List[Dict], batch_size: int = 5,
+                      progress_callback: Optional[Callable] = None) -> List[Dict]:
+        """
+        Extract main topics from video titles and descriptions.
+        
+        Args:
+            videos: List of video dictionaries
+            batch_size: Number of concurrent API calls (default: 5)
+            progress_callback: Optional callback function(current, total, batch_info)
+            
+        Returns:
+            List of videos with extracted topics
+        """
+        # Run async function in sync context
+        return asyncio.run(self.extract_topics_async(videos, batch_size, progress_callback))
     
     def cluster_similar_topics(self, videos: List[Dict], similarity_threshold: float = 0.7) -> Dict[str, List[Dict]]:
         """

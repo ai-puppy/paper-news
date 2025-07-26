@@ -51,6 +51,17 @@ with st.sidebar:
         index=0
     )
     
+    # Advanced options - define batch_size with default value
+    batch_size = 5  # Default value
+    with st.expander("Advanced Options"):
+        batch_size = st.slider(
+            "Parallel Processing Batch Size",
+            min_value=1,
+            max_value=10,
+            value=5,
+            help="Number of videos to process concurrently. Higher values are faster but may hit rate limits."
+        )
+    
     analyze_button = st.button("🔍 Analyze Trends", type="primary", use_container_width=True)
 
 # Main content area
@@ -91,11 +102,43 @@ if analyze_button:
             video_stats = stats.get(video["video_id"], {})
             video.update(video_stats)
         
-        # Step 3: Extract topics
+        # Step 3: Extract topics with batch processing
         status_text.text("Analyzing topics with AI...")
         progress_bar.progress(60)
         
-        videos_with_topics = topic_analyzer.extract_topics(videos)
+        # Create containers for detailed progress
+        progress_container = st.container()
+        with progress_container:
+            batch_status = st.empty()
+            processing_list = st.empty()
+        
+        # Progress callback for topic extraction
+        def topic_progress_callback(current, total, batch_info):
+            # Calculate progress within the 60-80% range
+            progress_pct = 60 + (current / total * 20)
+            progress_bar.progress(int(progress_pct))
+            
+            # Update status text
+            batch_num = (batch_info["batch_start"] // 5) + 1
+            total_batches = (total + 4) // 5  # Ceiling division
+            batch_status.text(f"Processing batch {batch_num}/{total_batches} (videos {batch_info['batch_start']+1}-{batch_info['batch_end']})")
+            
+            # Show currently processing videos
+            processing_text = "Currently processing:\n"
+            for title in batch_info["processing_titles"]:
+                processing_text += f"• {title}\n"
+            processing_list.text(processing_text)
+        
+        # Use batch size from sidebar configuration
+        videos_with_topics = topic_analyzer.extract_topics(
+            videos, 
+            batch_size=batch_size,
+            progress_callback=topic_progress_callback
+        )
+        
+        # Clear the detailed progress info
+        batch_status.empty()
+        processing_list.empty()
         
         # Step 4: Cluster topics
         status_text.text("Clustering similar topics...")
@@ -260,11 +303,6 @@ else:
     - More videos analyzed means better topic clustering
     """)
     
-    # Show example
-    with st.expander("📸 See Example Output"):
-        st.image("https://via.placeholder.com/800x400?text=Example+Trend+Analysis+Chart", 
-                caption="Example trend analysis visualization")
-
 # Footer
 st.markdown("---")
 st.caption("Built with Streamlit, LangChain, and YouTube Data API")
