@@ -144,9 +144,8 @@ if analyze_button:
         status_text.text("Clustering similar topics...")
         progress_bar.progress(80)
         
-        # Use semantic similarity for clustering with configurable threshold
-        similarity_threshold = 0.7  # Can be made configurable in sidebar
-        clustered_videos = topic_analyzer.cluster_similar_topics(videos_with_topics, similarity_threshold)
+        # Use semantic similarity for clustering with default threshold
+        clustered_videos = topic_analyzer.cluster_similar_topics(videos_with_topics)
         
         # Step 5: Calculate trend scores
         status_text.text("Calculating trend scores...")
@@ -242,7 +241,9 @@ if analyze_button:
                 
                 st.subheader("Top Videos")
                 for video in trend["top_videos"]:
-                    st.write(f"**{video['title']}**")
+                    # Create clickable link to YouTube video
+                    video_url = f"https://www.youtube.com/watch?v={video['video_id']}"
+                    st.markdown(f"**[{video['title']}]({video_url})**")
                     st.caption(f"Channel: {video['channel_title']} | Views: {video.get('view_count', 0):,}")
                     st.write("---")
         
